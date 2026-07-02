@@ -18,11 +18,10 @@ os.system('cls')
 
 urllib3.disable_warnings(InsecureRequestWarning)
 
-if not os.path.exists("logs"):
-    os.makedirs("logs")
-    
-open('./logs/pengtrackerlogs.log', 'w').close()
-logging.basicConfig(filename='./logs/pengtrackerlogs.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+if os.path.exists(os.path.join(BASE_DIR, "logs")):
+    logging.basicConfig(filename=os.path.join(BASE_DIR, "logs", 'pt.log'), filemode = 'w', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+else:
+    logging.disable(logging.CRITICAL)
 
 class ValorantWs:
     def __init__(self, lockfile):
@@ -35,13 +34,11 @@ class ValorantWs:
         self.in_game = False
         self.previous_state = None
         self.loading_printed = False
-        self.ingame_counter = 0
-        self.printed_ingame = False
         self.console = Console()
 
     async def connect_to_websocket(self):
         local_headers = {
-            'Authorization': 'Basic ' + base64.b64encode(('riot:' + self.lockfile['password']).encode()).decode()
+            'Authorization': basic_auth(self.lockfile['password'])
         }
         url = f"wss://127.0.0.1:{self.lockfile['port']}"
 
@@ -50,7 +47,11 @@ class ValorantWs:
         async with websockets.connect(url, ssl=self.ssl_context, extra_headers=local_headers) as websocket:
             await websocket.send('[5, "OnJsonApiEvent_chat_v4_presences"]')
             print('\033[92m' + "Websocket connection established." + '\033[0m')
-            time.sleep(3)
+            try:
+                preload_all()
+            except Exception as e:
+                print(f"Error during preload: {str(e)}")
+                logging.error(f"Error during preload: {str(e)}")
             try:
                 if check_coregame():
                     self.handle_coregame()
@@ -60,7 +61,8 @@ class ValorantWs:
                     self.handle_menus()
 
             except Exception as e:
-                print(f"error during check: {str(e)}")
+                await asyncio.sleep(3)
+                self.handle_menus()
                 logging.error(f"error during check: {str(e)}")
             while self.running:
                 response = await websocket.recv()
@@ -71,11 +73,11 @@ class ValorantWs:
             'session': f'https://127.0.0.1:{self.lockfile["port"]}/chat/v1/session'
         }
         headers = {
-            'Authorization': 'Basic ' + base64.b64encode(('riot:' + self.lockfile['password']).encode()).decode()
+            'Authorization': basic_auth(self.lockfile['password'])
         }
         try:
-            response = requests.get(endpoints['session'], headers=headers, verify=False)
-        except:
+            response = requests.get(endpoints['session'], headers=headers, verify=False, timeout=TIMEOUT)
+        except Exception:
             self.console.print("[bold red]VALORANT is not running. Please start VALORANT and try again.")
             exit()
         logging.info(f"get_user_puuid")
@@ -84,24 +86,26 @@ class ValorantWs:
     def handle(self, message):
         try:
             parsed_message = json.loads(message)
-            if parsed_message[1] == "OnJsonApiEvent_chat_v4_presences" and parsed_message[2]['data']['presences']:
-                presences = parsed_message[2]['data']['presences']
-                for presence in presences:
-                    if presence['puuid'] == self.user_puuid:
-                        step1 = base64.b64decode(presence['private'])
-                        step2 = json.loads(step1)
-                        new_state = step2.get('sessionLoopState', None)
-                        if new_state != self.previous_state:
-                            self.previous_state = new_state
-                            if new_state == "MENUS":
-                                logging.info(f"handling MENUS")
-                                self.handle_menus()
-                            elif new_state == "PREGAME":
-                                logging.info(f"handling PREGAME")
-                                self.handle_pregame()
-                            if new_state == "INGAME":
-                                logging.info(f"handling INGAME")
-                                self.handle_coregame()
+            if parsed_message[1] == "OnJsonApiEvent_chat_v4_presences" and parsed_message[2]['data']['presences'] and parsed_message[2]['data']['presences'][0]['puuid'] == self.user_puuid:
+                presence = parsed_message[2]['data']['presences'][0]
+                private = json.loads(base64.b64decode(presence['private']))
+                new_state = private['matchPresenceData']['sessionLoopState']
+                if new_state != self.previous_state:
+                    self.previous_state = new_state
+                    if new_state == "MENUS":
+                        logging.info(f"handling MENUS")
+                        self.handle_menus()
+                    elif new_state == "PREGAME":
+                        logging.info(f"handling PREGAME")
+                        self.handle_pregame()
+                    if new_state == "INGAME":
+                        logging.info(f"handling INGAME")
+                        self.handle_coregame()
+
+                if new_state == "MENUS" and self.previous_state == "MENUS":
+                    if get_party_change():
+                        logging.info(f"handling MENUS (update)")
+                        self.handle_menus()
 
         except json.JSONDecodeError as e:
             pass
@@ -116,16 +120,10 @@ class ValorantWs:
     def handle_coregame(self):
         if not self.in_game:
             self.in_game = True
-            if not self.loading_printed:
-                self.loading_printed = True
-                os.system('cls')
-                self.console.print(f"[dodger_blue2]Pengtracker v{version}")
-                core()
-        self.ingame_counter += 1
-        if self.ingame_counter == 1:
-            self.printed_ingame = True
-        elif self.ingame_counter > 1 and not self.printed_ingame:
-            pass
+            self.loading_printed = True
+            os.system('cls')
+            self.console.print(f"[dodger_blue2]Pengtracker v{version}")
+            core()
 
     def handle_menus(self):
         os.system('cls')
@@ -133,15 +131,14 @@ class ValorantWs:
         party()
         self.in_game = False
         self.loading_printed = False
-        self.ingame_counter = 0
-    
+
     def stop(self):
         self.running = False
 
 if __name__ == "__main__":
-    version = "4.5.0"
-    logging.info(f"PengTracker v{version}")
-    Console().print(f"[dodger_blue2]PengTracker v{version}")
+    version = "4.9.5"
+    logging.info(f"Pengtracker v{version}")
+    Console().print(f"[dodger_blue2]Pengtracker v{version}")
     try:
         lockfile_path = os.path.join(os.getenv('LOCALAPPDATA'), R'Riot Games\Riot Client\Config\lockfile')
         with open(lockfile_path) as lockfile:
@@ -158,6 +155,6 @@ if __name__ == "__main__":
         valorant_ws.stop()
         print("Websocket connection stopped.")
     except Exception as e:
-        print("VALORANT is not running.")
+        Console().print("[bold red]VALORANT is not running.")
         input("Press enter to exit.")
-        exit()
+        os._exit(0)
